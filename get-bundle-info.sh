@@ -4,21 +4,12 @@
 : "${IIB_REGISTRY_PORT:=50051}"
 : "${IIB_REGISTRY_NAME:=iib_registry_server}"
 
+: "${IIB_EXPLORER_OUTPUT:=text}"
+
 # This script uses gRPCurl
 # https://github.com/fullstorydev/grpcurl
 # More details the registry usage can be found at
 # https://github.com/operator-framework/operator-registry
-
-inspect() {
-  local line="$1"
-  if [[ -n "$line" ]]; then
-    podman pull -q "$line" > /dev/null && podman inspect "$line" | jq -r '.[0] | (.Labels.version + "-" +  .Labels.release) as $Version | { Id, Digest, $Version }'
-  else
-    while read line; do
-      inspect "$line"
-    done
-  fi
-}
 
 run_registry_server() {
   local iib="$1"
@@ -30,52 +21,109 @@ stop_registry_server() {
   podman rm "$IIB_REGISTRY_NAME" -f -i
 }
 
-get_package() {
-  local package="$1"
-  grpcurl -plaintext -d "{\"name\":\"$package\"}" "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" api.Registry/GetPackage
+get_api() {
+  grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" "$@"
+}
+
+list_api() {
+  local services=$(get_api "list" | paste -sd " ")
+  local services_json=""
+  for service in ${services}; do
+    local methods=$(get_api "list" "${service}")
+    local methods_json=$(echo -n "${methods}" | jq -cRs 'split("\n")')
+    services_json+="{\"name\":\"${service}\",\"methods\":${methods_json}}"
+  done
+  services_json=$(echo "${services_json}" | jq -s)
+  if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
+    # headers
+    echo "SERVICE,METHOD"
+    # data
+    echo "${services_json}" | jq -r '.[] | .name as $service | .methods[] as $method | $service + "," + $method'
+  else
+    echo "${services_json}"
+  fi
+}
+
+describe_api() {
+  get_api "describe" "${1}"
+}
+
+get_resources() {
+  local api="${1}"
+  local data="${2}"
+  if [[ -z "${data}" ]]; then
+    grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" "${api}"
+  else
+    grpcurl -plaintext -d "${data}" "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" "${api}"
+  fi
 }
 
 get_packages() {
-  grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" api.Registry/ListPackages
+  local api="api.Registry/ListPackages"
+  local resources=$(get_resources "${api}")
+  if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
+    # headers
+    echo "PACKAGE"
+    # data
+    echo "${resources}" | jq -r '.name'
+  else
+    echo "${resources}" | jq -r "."
+  fi
+}
+
+get_package() {
+  local package="${1}"
+  local api="api.Registry/GetPackage"
+  local data="{\"name\":\"$package\"}"
+  local resources=$(get_resources "${api}" "${data}")
+  if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
+    # headers
+    echo "PACKAGE,CHANNEL,CSV,DEFAULT"
+    # data
+    echo "${resources}" | jq -r '.name as $package | .defaultChannelName as $default | .channels[] | {$package,name,csvName, $default} | if .name == $default then .default="true" else .default="" end | .package + "," + .name + "," + .csvName + "," + .default'
+  else
+    echo "${resources}" | jq -r "."
+  fi
 }
 
 get_bundles() {
-  local package="$1"
-  local channel="$2"
-  grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" api.Registry/ListBundles | tee /tmp/all-bundles.json | jq --arg package "$package" --arg channel "$channel" -r 'select(.packageName == $package and .channelName == $channel) | { csvName, packageName, channelName, bundlePath, version, replaces }'
-}
-
-get_specific_bundle() {
-  local package="$1"
-  local channel="$2"
-  local version="$3"
-  local output_format="$4"
-  local bundle=$(grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" api.Registry/ListBundles | tee /tmp/all-bundles.json | jq --arg package "$package" --arg channel "$channel" --arg version "$version" -r 'select(.packageName == $package and .channelName == $channel and .version == $version)') 
-  local csv_json=$(echo "$bundle" | jq -r '.csvJson')
-  local bundle=$(echo "$bundle" | jq --argjson csv_json "$csv_json" -r '.csvJson=$csv_json')
-  if [[ "$output_format" == "plain" ]]; then
-    echo "$bundle" | jq -r .
+  local api="api.Registry/ListBundles"
+  local resources=$(get_resources "${api}" | jq -r 'del(.object,.csvJson)')
+  if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
+    # headers
+    echo "CSV,PACKAGE,CHANNEL"
+    # data
+    echo "${resources}" | jq -r '.csvName + "," + .packageName + "," + .channelName'
+  elif [[ "${IIB_EXPLORER_OUTPUT}" == "json" ]]; then
+    echo "${resources}" | jq -r '.'
   else
-    local bundle=$(echo "$bundle" | jq -r '.csvJson.metadata.annotations.containerImage as $containerImage | { csvName, packageName, channelName,  bundlePath, $containerImage}')
-    local bundlePathInspect=$(echo "$bundle" | jq -r '.bundlePath' | inspect)
-    local containerImageInspect=$(echo "$bundle" | jq -r '.containerImage' | inspect)
-    echo "$bundle" "{\"bundlePathInspect\": $bundlePathInspect}" "{\"containerImageInspect\": $containerImageInspect}" | jq -s add | jq -r '{ csvName, packageName, channelName,  bundlePath, bundlePathInspect, containerImage, containerImageInspect}'
+    echo "${resources}"
   fi
 }
 
 get_bundle() {
-  local package="$1"
-  local channel="$2"
-  grpcurl -plaintext -d "{\"pkgName\":\"$package\",\"channelName\":\"$channel\"}" "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" api.Registry/GetBundleForChannel
+  local bundle="${1}"
+  if [[ ! "${resource_name}" =~ ^.+:.+:.+$ ]]; then
+    error "Specify the resiurce in the format 'csv:package:channel'!"
+  fi
+  local api="api.Registry/GetBundle"
+  local data=$(echo "${resource_name}" | awk -F ':' '{ print "{\"pkgName\":\"" $2 "\",\"channelName\":\"" $3 "\",\"csvName\":\"" $1 "\"}" }')
+  local resources=$(get_resources "${api}" "${data}")
+  if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
+    # headers
+    echo "CSV,PACKAGE,CHANNEL"
+    # data
+    echo "${resources}" | jq -r '.csvName + "," + .packageName + "," + .channelName'
+  elif [[ "${IIB_EXPLORER_OUTPUT}" == "json" ]]; then
+    echo "${resources}" | jq -r '.'
+  else
+    echo "${resources}"
+  fi
 }
 
-print_bundle() {
-  local bundle="$1"
-  local csv_json=$(echo "$bundle" | jq -r '.csvJson')
-  local alm_examples=$(echo "$csv_json" | jq -r '.metadata.annotations."alm-examples"')
-  csv_json=$(echo "$csv_json" | jq --argjson alm_examples "$alm_examples" -r '.metadata.annotations."alm-examples"=$alm_examples')
-  bundle=$(echo "$bundle" | jq --argjson csv_json "$csv_json" -r '.csvJson=$csv_json')
-  echo "$bundle" | jq -r 'del(.object)'
+warn() {
+  local msg="$1"
+  echo "[WARN] $msg"
 }
 
 error() {
@@ -86,33 +134,116 @@ error() {
 }
 
 main() {
-  INDEX_IMAGE="$1"
-  PACKAGE_NAME="$2"
-  CHANNEL_NAME="$3"
-  ALL_BUNDLES="$4"
-  OUTPUT_FORMAT="$5"
+  local iib="${IIB}"
+  local api
+  local data
+  local package
 
-  if [[ -z "$INDEX_IMAGE" ]]; then
+  local operation="${1}"
+  local resource_type="${2}"
+  local resource_name="${3}"
+
+  while [[ $# -gt 0 ]]; do
+    local key="${1}"
+    case $key in
+    -i | --iib)
+      iib="${2}"
+      shift # past argument
+      shift # past value
+      ;;
+    -o | --output)
+      IIB_EXPLORER_OUTPUT="${2}"
+      shift # past argument
+      shift # past value
+      ;;
+    --api)
+      api="${2}"
+      shift # past argument
+      shift # past value
+      ;;
+    --data)
+      data="${2}"
+      shift # past argument
+      shift # past value
+      ;;
+    --package)
+      package="${2}"
+      shift # past argument
+      shift # past value
+      ;;
+    -h | --help) # print usage
+      print_usage
+      exit
+      ;;
+    *) # unknown option
+      unknown="$1"
+      shift
+      ;;
+    esac
+  done
+
+  if [[ -z "${iib}" ]]; then
     error "Specify an index image!"
   fi
 
-  run_registry_server "$INDEX_IMAGE" > /dev/null
+  if [[ "${IIB_EXPLORER_OUTPUT}" != "text" && "${IIB_EXPLORER_OUTPUT}" != "json" ]]; then
+    error "Unsupported output '${output}'!"
+  fi
+  
+  run_registry_server "${iib}" > /dev/null
 
-  if [[ -n "$PACKAGE_NAME" ]]; then
-    if [[ -n "$CHANNEL_NAME" ]]; then
-      if [[ "$ALL_BUNDLES" == "all" ]]; then
-        get_bundles "$PACKAGE_NAME" "$CHANNEL_NAME"
-      elif [[ -n "$ALL_BUNDLES" ]]; then
-        get_specific_bundle "$PACKAGE_NAME" "$CHANNEL_NAME" "$ALL_BUNDLES" "$OUTPUT_FORMAT"
+  local result=""
+  case $operation in
+    get)
+      case $resource_type in
+        packages)
+          result=$(get_packages)
+          ;;
+        package)
+          if [[ -z "${resource_name}" ]]; then
+            error "Specify a resource name!"
+          fi
+          result=$(get_package "${resource_name}")
+          ;;
+        bundles)
+          result=$(get_bundles)
+          ;;
+        bundle)
+          if [[ -z "${resource_name}" ]]; then
+            error "Specify a resource name!"
+          fi
+          result=$(get_bundle "${resource_name}")
+          ;;
+        *)
+          error "Unsupported resource type '${resource_type}'!"
+          ;;
+      esac
+      ;;
+    api)
+      if [[ -z "${resource_type}" ]]; then
+        result=$(list_api)
       else
-        BUNDLE=$(get_bundle "$PACKAGE_NAME" "$CHANNEL_NAME")
-        print_bundle "$BUNDLE"
+        warn "The output is not formatted as this is a direct output from grpcurl."
+        IIB_EXPLORER_OUTPUT="grpcurl"
+        result=$(describe_api "${resource_type}")
       fi
-    else
-      get_package "$PACKAGE_NAME"
-    fi
+      ;;
+    *)
+      error "Unsupported operation '${operation}'!"
+      ;;
+  esac
+  
+  #get_resources "${api}" "${data}"
+  #if [[ -n "${package}" ]]; then
+  #  result=$(get_package2 "${package}" "${output}")
+  #else
+  #  result=$(list_packages "${output}")
+  #fi
+
+  if [[ "${IIB_EXPLORER_OUTPUT}" == text ]]; then
+    echo "${result}" | column -t -s ','
   else
-    get_packages
+    echo "${result}"
   fi
 
   stop_registry_server > /dev/null
