@@ -241,7 +241,9 @@ main() {
   #fi
 
   if [[ "${IIB_EXPLORER_OUTPUT}" == text ]]; then
-    echo "${result}" | column -t -s ','
+    local header=$(echo "${result}" | head -n1)
+    local data=$(echo "${result}" | tail -n+2 | sort -t ',')
+    (echo "${header}"; echo "${data}") | column -t -s ','
   else
     echo "${result}"
   fi
