@@ -11,6 +11,29 @@
 # More details the registry usage can be found at
 # https://github.com/operator-framework/operator-registry
 
+print_usage() {
+  echo "Usage:"
+  echo "    ${BASH_SOURCE} get packages"
+  echo "    ${BASH_SOURCE} get package <package>"
+  echo "    ${BASH_SOURCE} get bundles"
+  echo "    ${BASH_SOURCE} get bundle <csv:package:channel>"
+  echo ""
+  echo "Options:"
+  local options=$(cat <<EOF
+    -o,;--output; Output format text (default) or json
+    -h,;--help; Print this help
+EOF
+        )
+  echo "${options}" | column -t -s ';' -o ' '
+}
+
+print_help() {
+  echo "Description:"
+  echo "    Command line tool for exploring index image bundles (iib)."
+  echo ""
+  print_usage
+}
+
 run_registry_server() {
   local iib="$1"
   stop_registry_server "$iib"
@@ -130,6 +153,8 @@ error() {
   local msg="$1"
   local exit_code="${2:-1}"
   echo "[ERROR] $msg"
+  echo ""
+  print_usage
   exit "$exit_code"
 }
 
@@ -172,7 +197,7 @@ main() {
       shift # past value
       ;;
     -h | --help) # print usage
-      print_usage
+      print_help
       exit
       ;;
     *) # unknown option
@@ -232,13 +257,6 @@ main() {
       error "Unsupported operation '${operation}'!"
       ;;
   esac
-  
-  #get_resources "${api}" "${data}"
-  #if [[ -n "${package}" ]]; then
-  #  result=$(get_package2 "${package}" "${output}")
-  #else
-  #  result=$(list_packages "${output}")
-  #fi
 
   if [[ "${IIB_EXPLORER_OUTPUT}" == text ]]; then
     local header=$(echo "${result}" | head -n1)
