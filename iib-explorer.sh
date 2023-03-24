@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 : "${IIB_REGISTRY_URL:=localhost}"
 : "${IIB_REGISTRY_PORT:=50051}"
@@ -13,18 +13,21 @@
 
 print_usage() {
   echo "Usage:"
-  echo "    ${BASH_SOURCE} get packages"
-  echo "    ${BASH_SOURCE} get package <package>"
-  echo "    ${BASH_SOURCE} get bundles"
-  echo "    ${BASH_SOURCE} get bundle <csv:package:channel>"
+  echo "    ${BASH_SOURCE[0]} get packages"
+  echo "    ${BASH_SOURCE[0]} get package <package>"
+  echo "    ${BASH_SOURCE[0]} get bundles"
+  echo "    ${BASH_SOURCE[0]} get bundle <csv:package:channel>"
   echo ""
   echo "Options:"
-  local options=$(cat <<EOF
+  local options
+  options="$(cat <<EOF
     -o,;--output; Output format text (default) or json
     -h,;--help; Print this help
 EOF
-        )
-  echo "${options}" | column -t -s ';' -o ' '
+        )"
+  local options_table
+  options_table=$(echo "${options}" | column -t -s ';' -o ' ')
+  echo "${options_table}"
 }
 
 print_help() {
@@ -46,6 +49,15 @@ stop_registry_server() {
 
 get_api() {
   grpcurl -plaintext "$IIB_REGISTRY_URL:$IIB_REGISTRY_PORT" "$@"
+}
+
+api() {
+  local resource="${1}"
+  if [[ -n "${resource}" ]]; then
+    describe_api "${resource}"
+  else
+    list_api
+  fi
 }
 
 list_api() {
@@ -96,9 +108,13 @@ get_packages() {
 
 get_package() {
   local package="${1}"
+  if [[ -z "${package}" ]]; then
+    error "Specify package name!"
+  fi
   local api="api.Registry/GetPackage"
   local data="{\"name\":\"$package\"}"
-  local resources=$(get_resources "${api}" "${data}")
+  local resources
+  resources=$(get_resources "${api}" "${data}")
   if [[ "${IIB_EXPLORER_OUTPUT}" == "text" ]]; then
     # headers
     echo "PACKAGE,CHANNEL,CSV,DEFAULT"
@@ -158,11 +174,35 @@ error() {
   exit "$exit_code"
 }
 
+execute_cmd() {
+  local cmd
+  local cmd_args
+  local cli_function
+
+  cmd=$(echo "${1}_" | tr ' ' '_')
+  for f in $(compgen -A function); do
+    if [[ "${cmd}" =~ ^${f}_ ]]; then
+      if [[ -n "${cli_function}" ]]; then
+        error "Ambigious command '${cmd}' (matches '${cli_function}' and '${f}')"
+      fi
+      cli_function="${f}"
+    fi
+  done
+  if [[ -n "${cli_function}" ]]; then
+    cmd_args="${cmd#"${cli_function}"}"
+    cmd_args=$(echo "${cmd_args}" | tr '_' ' ')
+    eval "${cli_function} ${cmd_args}"
+  else
+    error "Unsupported command '${cmd}'"
+  fi
+}
+
 main() {
   local iib="${IIB}"
   local api
   local data
   local package
+  local command=""
 
   local operation="${1}"
   local resource_type="${2}"
@@ -171,28 +211,8 @@ main() {
   while [[ $# -gt 0 ]]; do
     local key="${1}"
     case $key in
-    -i | --iib)
-      iib="${2}"
-      shift # past argument
-      shift # past value
-      ;;
     -o | --output)
       IIB_EXPLORER_OUTPUT="${2}"
-      shift # past argument
-      shift # past value
-      ;;
-    --api)
-      api="${2}"
-      shift # past argument
-      shift # past value
-      ;;
-    --data)
-      data="${2}"
-      shift # past argument
-      shift # past value
-      ;;
-    --package)
-      package="${2}"
       shift # past argument
       shift # past value
       ;;
@@ -200,63 +220,33 @@ main() {
       print_help
       exit
       ;;
-    *) # unknown option
-      unknown="$1"
-      shift
+    *) # unknown option is considered as part of command
+      if [[ -n "${command}" ]]; then
+        command+=" ${1}"
+      else
+        command+="${1}"
+      fi
+      shift # past argument
       ;;
     esac
   done
+
+  echo "execute '${command}'"
 
   if [[ -z "${iib}" ]]; then
     error "Specify an index image!"
   fi
 
   if [[ "${IIB_EXPLORER_OUTPUT}" != "text" && "${IIB_EXPLORER_OUTPUT}" != "json" ]]; then
-    error "Unsupported output '${output}'!"
+    error "Unsupported output '${IIB_EXPLORER_OUTPUT}'!"
   fi
   
   run_registry_server "${iib}" > /dev/null
 
   local result=""
-  case $operation in
-    get)
-      case $resource_type in
-        packages)
-          result=$(get_packages)
-          ;;
-        package)
-          if [[ -z "${resource_name}" ]]; then
-            error "Specify a resource name!"
-          fi
-          result=$(get_package "${resource_name}")
-          ;;
-        bundles)
-          result=$(get_bundles)
-          ;;
-        bundle)
-          if [[ -z "${resource_name}" ]]; then
-            error "Specify a resource name!"
-          fi
-          result=$(get_bundle "${resource_name}")
-          ;;
-        *)
-          error "Unsupported resource type '${resource_type}'!"
-          ;;
-      esac
-      ;;
-    api)
-      if [[ -z "${resource_type}" ]]; then
-        result=$(list_api)
-      else
-        warn "The output is not formatted as this is a direct output from grpcurl."
-        IIB_EXPLORER_OUTPUT="grpcurl"
-        result=$(describe_api "${resource_type}")
-      fi
-      ;;
-    *)
-      error "Unsupported operation '${operation}'!"
-      ;;
-  esac
+  result=$(execute_cmd "${command}")
+
+  stop_registry_server > /dev/null
 
   if [[ "${IIB_EXPLORER_OUTPUT}" == text ]]; then
     local header=$(echo "${result}" | head -n1)
@@ -265,8 +255,6 @@ main() {
   else
     echo "${result}"
   fi
-
-  stop_registry_server > /dev/null
 }
 
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@"
