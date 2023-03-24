@@ -11,23 +11,20 @@
 # More details the registry usage can be found at
 # https://github.com/operator-framework/operator-registry
 
+cli_options() {
+  echo "-o,;--output; Output format text (default) or json"
+  echo "-h,;--help; Print this help"
+}
+
 print_usage() {
   echo "Usage:"
-  echo "    ${BASH_SOURCE[0]} get packages"
-  echo "    ${BASH_SOURCE[0]} get package <package>"
-  echo "    ${BASH_SOURCE[0]} get bundles"
-  echo "    ${BASH_SOURCE[0]} get bundle <csv:package:channel>"
+  echo "    iib-explorer get packages"
+  echo "    iib-explorer get package <package>"
+  echo "    iib-explorer get bundles"
+  echo "    iib-explorer get bundle <csv:package:channel>"
   echo ""
   echo "Options:"
-  local options
-  options="$(cat <<EOF
-    -o,;--output; Output format text (default) or json
-    -h,;--help; Print this help
-EOF
-        )"
-  local options_table
-  options_table=$(echo "${options}" | column -t -s ';' -o ' ')
-  echo "${options_table}"
+  cli_options | awk '{ print "    " $1 }' | column -t -s ';' -o ' '
 }
 
 print_help() {
